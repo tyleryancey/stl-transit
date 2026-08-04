@@ -1,9 +1,21 @@
 {
+  "_comment": [
+    "Paste the mcpServers block into your client config.",
+    "Cowork: Settings -> Connectors -> Add local server.",
+    "Claude Desktop: ~/Library/Application Support/Claude/claude_desktop_config.json",
+    "Claude Code: claude mcp add stl-transit --scope user --env STL_HOME=<repo> -- <repo>/.venv/bin/stl-mcp",
+    "",
+    "Both paths must be ABSOLUTE. STL_HOME decides where snapshots live; pointing",
+    "it at the repo (gitignored) keeps everything an agent touched next to the",
+    "code, which is what makes a session reproducible after the fact.",
+    "",
+    "No API keys: every source is public and unauthenticated."
+  ],
   "mcpServers": {
     "stl-transit": {
       "command": "/absolute/path/to/stl-transit/.venv/bin/stl-mcp",
       "env": {
-        "STL_HOME": "/absolute/path/to/stl-transit/.data"
+        "STL_HOME": "/absolute/path/to/stl-transit"
       }
     }
   }

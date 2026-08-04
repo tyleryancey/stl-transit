@@ -719,21 +719,56 @@ def _rail_route_ids_stable(ctx: _Ctx, spec: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------- realtime checks --
 
 def _rt_fresh(ctx: _Ctx, spec: dict[str, Any]) -> dict[str, Any]:
+    """Was Metro's realtime feed current AT THE MOMENT IT WAS FETCHED?
+
+    That is the question the app depends on. Measuring the stored snapshot's
+    header timestamp against *now* answers a different one -- "how long since I
+    last fetched" -- and conflating the two makes this assumption fail every
+    morning on any machine that did not fetch overnight. An assumption that is
+    red every day is one people learn to ignore, which costs more than the
+    check is worth.
+
+    So: prefer `age_at_fetch_seconds`, and when the local copy is too old to
+    testify about the live feed, SKIP with a remedy. Skip means the measurement
+    was not taken, which is exactly what is true.
+    """
     ceiling = float(spec.get("max_age_seconds", 300))
     required = [str(e) for e in spec.get("required_entities", [])] or sorted(ctx.rt_feeds or {})
     feeds = ctx.rt_feeds or {}
     missing = [e for e in required if e not in feeds]
     ages: dict[str, float] = {}
     unmeasured: list[str] = []
+    measured_at_fetch = False
     for entity in required:
         entry = feeds.get(entity)
         if entry is None:
             continue
-        age = entry.get("age_seconds")
+        age = entry.get("age_at_fetch_seconds")
+        if age is not None:
+            measured_at_fetch = True
+        else:
+            age = entry.get("age_seconds")
         if age is None:
             unmeasured.append(entity)
         else:
             ages[entity] = float(age)
+
+    if measured_at_fetch:
+        # How long ago the freshest sample was taken. Past the ceiling, nothing
+        # here describes the live feed any more.
+        since = [
+            float(e["fetched_ago_seconds"]) for e in feeds.values()
+            if e.get("fetched_ago_seconds") is not None
+        ]
+        if since and min(since) > ceiling:
+            return _skipped(
+                ceiling,
+                f"The freshest realtime sample was fetched {round(min(since))}s ago, "
+                f"which is past the {ceiling}s window this assumption describes. A "
+                "stored snapshot cannot testify about the live feed. Re-fetch with "
+                "`stl rt fetch --all` and re-run to measure it.",
+            )
+
     if not ages and not missing:
         return _skipped(ceiling, "No entity in the realtime sample reports age_seconds, "
                                  "so freshness is not measurable. `stl rt health` "
@@ -741,10 +776,11 @@ def _rt_fresh(ctx: _Ctx, spec: dict[str, Any]) -> dict[str, Any]:
     worst_entity = max(ages, key=lambda e: (ages[e], e)) if ages else None
     observed = round(ages[worst_entity], 1) if worst_entity else None
     stale = sorted(e for e, a in ages.items() if a > ceiling)
+    basis = "when fetched" if measured_at_fetch else "against now"
     if not missing and not stale:
         return _result(True, observed, ceiling,
-                       f"The oldest realtime feed is {worst_entity} at {observed}s; "
-                       f"threshold {ceiling}s.")
+                       f"The oldest realtime feed is {worst_entity} at {observed}s "
+                       f"({basis}); threshold {ceiling}s.")
     parts = []
     if stale:
         parts.append("stale: " + ", ".join(f"{e} at {round(ages[e], 1)}s" for e in stale))

@@ -720,18 +720,30 @@ def _rt_feeds_for_assertions(store: Store, now: datetime) -> dict[str, dict[str,
         snaps = store.list(source=source)
         if not snaps:
             continue
-        blob = snaps[0].payload.read_bytes()
+        snap = snaps[0]
+        blob = snap.payload.read_bytes()
         decoded = rtdecode.decode_feed(blob)
         ts = decoded["header"].get("timestamp")
+        fetched = snap.fetched_at
         trip_ids = [
             (e.get("trip_update") or {}).get("trip", {}).get("trip_id")
             for e in decoded["entities"]
             if e.get("trip_update")
         ]
         feeds[entity] = {
-            "snapshot_id": snaps[0].snapshot_id,
+            "snapshot_id": snap.snapshot_id,
             "header_timestamp": ts,
+            # Two different ages, because they answer two different questions.
+            # `age_at_fetch` is how far behind Metro's feed was when we took the
+            # sample -- the property the app actually depends on. `age_seconds`
+            # is how old our copy is now, which is a "go fetch" signal and not a
+            # statement about Metro at all. Reporting only the second made this
+            # assumption fail every morning on a machine that slept.
+            "age_at_fetch_seconds": (
+                (fetched.timestamp() - ts) if (ts and fetched) else None),
             "age_seconds": (now.timestamp() - ts) if ts else None,
+            "fetched_ago_seconds": (
+                (now.timestamp() - fetched.timestamp()) if fetched else None),
             "trip_ids": [t for t in trip_ids if t],
             "entity_count": decoded["entity_count"],
             "unmodelled": rtdecode.field_census([blob])["unmodelled"],
