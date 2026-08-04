@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 
 from ... import __version__
 from ...errors import StopNotFound
+from ...io.clock import AGENCY_TZ
 from ..bundle import canonical_json, sha256_text
 from ..gtfs import departures as dep
 from ..rt import merge as rtmerge
@@ -379,14 +380,28 @@ def _time_key(value: Any) -> str | None:
         except ValueError:
             parsed = None
         if parsed is not None:
-            return f"{parsed.hour:02d}:{parsed.minute:02d}"
+            return _clock_key(parsed)
         match = re.search(r"(\d{1,2}):(\d{2})", text)
         if match:
             return f"{int(match.group(1)) % 24:02d}:{int(match.group(2)):02d}"
         return None
     if isinstance(value, datetime):
-        return f"{value.hour:02d}:{value.minute:02d}"
+        return _clock_key(value)
     return None
+
+
+def _clock_key(parsed: datetime) -> str:
+    """Local agency clock reading for an instant.
+
+    A device that logs in UTC writes 19:00Z for the same departure the oracle
+    calls 14:00-05:00. Reading `.hour` off whichever form arrived made every
+    such row a mismatch, and this function's own docstring promises the
+    opposite. Offset-aware values are normalised to the agency zone; naive
+    values are taken at face value, since a bare '14:00' is already local.
+    """
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(AGENCY_TZ)
+    return f"{parsed.hour:02d}:{parsed.minute:02d}"
 
 
 def _compare_key(value: Any) -> Any:

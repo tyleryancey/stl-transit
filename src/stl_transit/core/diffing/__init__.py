@@ -395,7 +395,12 @@ def _stop_ids(conn_a: sqlite3.Connection, conn_b: sqlite3.Connection,
     # measured", and `meets_assumption: true` beside `survival_rate: null` is a
     # green light nobody earned. The same skip-is-not-pass rule the assertion
     # suite follows.
-    measured = worst is not None
+    # stop_code is what the app resolves against, so its absence is not a
+    # detail the stop_id rate can compensate for: passing on stop_id alone
+    # while the code rate is null is the same unearned green light, one level
+    # narrower.
+    code_measurable = has_code["a"] and has_code["b"]
+    measured = worst is not None and code_measurable
     meets = measured and worst >= STOP_CODE_SURVIVAL_FLOOR
 
     if not has_code["a"] or not has_code["b"]:

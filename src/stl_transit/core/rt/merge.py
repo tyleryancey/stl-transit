@@ -22,6 +22,17 @@ def _plausible_delay(delay: int) -> bool:
     return -MAX_PLAUSIBLE_DELAY_SECONDS <= delay <= MAX_PLAUSIBLE_DELAY_SECONDS
 
 
+# Roughly year 1970 +/- a century. Anything outside this cannot be turned into
+# a datetime on any platform, so it must be rejected by arithmetic before a
+# datetime is constructed from it.
+_EPOCH_FLOOR = -3_000_000_000
+_EPOCH_CEILING = 6_000_000_000
+
+
+def _representable_epoch(epoch: int) -> bool:
+    return _EPOCH_FLOOR <= epoch <= _EPOCH_CEILING
+
+
 def index_trip_updates(decoded: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """trip_id -> TripUpdate, for joining against scheduled trips."""
     out: dict[str, dict[str, Any]] = {}
@@ -60,10 +71,14 @@ def _stop_delay(
             if rel == "SKIPPED":
                 return None, None, "SKIPPED"
             event = u.get("departure") or u.get("arrival") or {}
-            if event.get("delay") is not None:
-                return int(event["delay"]), None, rel
+            # gtfs-realtime.proto, StopTimeEvent: "If both time and delay are
+            # specified, time will take precedence." Preferring delay because
+            # it was the branch written first is a silent spec violation that
+            # only shows up against producers that send both.
             if event.get("time") is not None:
                 return None, int(event["time"]), rel
+            if event.get("delay") is not None:
+                return int(event["delay"]), None, rel
             return None, None, rel
     if tu.get("delay") is not None:
         return int(tu["delay"]), None, "SCHEDULED"
@@ -107,22 +122,30 @@ def merge(scheduled: dict[str, Any], decoded: dict[str, Any] | None) -> dict[str
             if rel == "SKIPPED":
                 rec["predicted_local"] = None
             elif epoch is not None:
-                # Absolute prediction. Derive the delay from it rather than the
-                # other way round, so downstream code has one shape to handle.
-                predicted = datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone(zone)
-                derived = int(
-                    (predicted.astimezone(timezone.utc) - base.astimezone(timezone.utc))
-                    .total_seconds()
+                # Range-check the epoch BEFORE constructing a datetime from it.
+                # `time` is a signed int64, so a garbage varint reaches here
+                # intact and datetime.fromtimestamp raises OverflowError or
+                # OSError -- the exact crash the delay guard exists to prevent,
+                # reintroduced on the newer branch. Bound it first, then build.
+                derived = (
+                    (epoch - int(base.timestamp()))
+                    if _representable_epoch(epoch) else None
                 )
-                if not _plausible_delay(derived):
+                if derived is None or not _plausible_delay(derived):
                     rec["status"] = "IMPLAUSIBLE_DELAY"
-                    rec["delay_seconds"] = derived
+                    rec["delay_seconds"] = derived if derived is not None else epoch
                     rec["predicted_local"] = None
                     warnings.append(
-                        f"Trip {rec['trip_id']} gave an absolute time implying "
-                        f"{derived}s of delay, outside +/-{MAX_PLAUSIBLE_DELAY_SECONDS}s."
+                        f"Trip {rec['trip_id']} gave an absolute time {epoch} "
+                        f"({'unrepresentable' if derived is None else str(derived) + 's of delay'}), "
+                        f"outside +/-{MAX_PLAUSIBLE_DELAY_SECONDS}s of schedule."
                     )
                 else:
+                    # Derive the prediction from the delay so both branches
+                    # produce one shape for downstream code to handle.
+                    predicted = (
+                        base.astimezone(timezone.utc) + timedelta(seconds=derived)
+                    ).astimezone(zone)
                     rec["delay_seconds"] = derived
                     rec["delay_basis"] = "absolute_time"
                     rec["predicted_local"] = predicted.isoformat()

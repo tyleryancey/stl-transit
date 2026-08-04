@@ -63,8 +63,10 @@ def build_sqlite(zip_path: Path, db_path: Path, force: bool = False) -> dict[str
     """
     if db_path.exists() and not force:
         return {"db_path": str(db_path), "rebuilt": False, "tables": _table_counts(db_path)}
-    if db_path.exists():
-        db_path.unlink()
+    # Deliberately NOT unlinking an existing database here. `replace()` at the
+    # end is atomic, so the old file is only displaced once a new one is known
+    # good -- and unlinking first meant a failed `--force` rebuild destroyed a
+    # perfectly working database on the way to not producing a new one.
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Build into a temporary file and rename only on success. `sqlite3.connect`
@@ -137,18 +139,35 @@ def build_sqlite(zip_path: Path, db_path: Path, force: bool = False) -> dict[str
     finally:
         conn.close()
 
-    if not counts:
-        # An archive with no .txt members is not a GTFS feed. Publishing an
-        # empty database here is what made a broken import indistinguishable
-        # from an agency that deleted every stop.
+    # Count ROWS, not files. Testing only for the presence of .txt members let
+    # an archive of header-only CSVs -- which is what a truncated download or a
+    # failed export produces -- publish a zero-row database that the fast path
+    # above then served as a complete feed.
+    total_rows = sum(counts.values())
+    if not counts or total_rows == 0:
         tmp_path.unlink(missing_ok=True)
         raise EmptyFeed(
-            f"No GTFS .txt files found in {zip_path.name}; refusing to build an "
-            "empty database.",
-            remedy="Check that this snapshot is a GTFS zip and not a realtime "
-            "protobuf or an HTML error page saved with a .zip name. "
-            "`stl snapshot show <id>` reports the stored content type.",
+            f"{zip_path.name} produced {len(counts)} table(s) and zero rows; "
+            "refusing to publish an empty database.",
+            remedy="Check that this snapshot is a complete GTFS zip and not a "
+            "realtime protobuf, an HTML error page saved with a .zip name, or a "
+            "truncated download. `stl snapshot show <id>` reports the stored "
+            "size and content type; re-fetch with `stl snapshot fetch --force`.",
             zip_path=str(zip_path),
+            tables=len(counts),
+        )
+    if not counts.get("stops"):
+        # Every rider-facing feature resolves through stops. A feed without them
+        # is not partially useful, it is unusable, and saying so here is far
+        # cheaper than every caller discovering it separately.
+        tmp_path.unlink(missing_ok=True)
+        raise EmptyFeed(
+            f"{zip_path.name} contains no stops; refusing to publish it.",
+            remedy="A GTFS feed with no stops cannot answer any departure query. "
+            "Verify the download completed, then re-fetch with "
+            "`stl snapshot fetch --force`.",
+            zip_path=str(zip_path),
+            tables=sorted(counts),
         )
     tmp_path.replace(db_path)
     return {"db_path": str(db_path), "rebuilt": True, "tables": counts}

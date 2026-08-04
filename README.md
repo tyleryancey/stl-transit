@@ -172,7 +172,7 @@ drop into cron or a GitHub Action without anyone parsing output.
 
 ```bash
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest -q     # 420 tests, no network
+.venv/bin/pytest -q     # 431 tests, no network
 ```
 
 Everything runs against miniature synthetic feeds in `tests/fixtures.py` — three
@@ -196,12 +196,22 @@ Two suites go further than unit coverage:
   failures all happen before any of this code runs.
 
 `tests/test_review_fixes.py` is worth reading on its own: it pins a class of bug
-that appeared four separate times in this codebase. Adding a `timedelta` to a
-zone-aware datetime, or subtracting two datetimes that share a `tzinfo` object,
-is *wall-clock* arithmetic in Python. It is correct on 363 days a year. On the
-fall-back night it made a bus 45 minutes away report as **−15 minutes** and
-disappear from the board entirely. If you touch time arithmetic here, do it in
-UTC and add a test dated in March or November.
+that appeared **six** separate times in this codebase. Adding a `timedelta` to a
+zone-aware datetime, or subtracting or comparing two datetimes that share a
+`tzinfo` object, is *wall-clock* arithmetic in Python. It is correct on 363 days
+a year. On the fall-back night it made a bus 45 minutes away report as
+**−15 minutes** and disappear from the board entirely; a fixed 1440-minute probe
+missed the 25th hour and told a developer a stop had no service when it did.
+If you touch time arithmetic here, do it in UTC, and add a test dated in March
+or November — the shipped feed only covers about a month, so no real snapshot
+can exercise a transition.
+
+The second recurring theme is **reporting success on a measurement never taken**:
+a survival rate of `null` beside `meets_assumption: true`, a drift check that
+returned `ok` having verified zero fixtures, an assumption that failed every
+morning because it measured how long since you last fetched rather than what it
+claimed to. That failure mode does not announce itself — it looks exactly like
+good news. `skip` is a first-class outcome here for that reason.
 
 ## Evaluations
 

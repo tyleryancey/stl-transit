@@ -266,28 +266,23 @@ def test_a_zero_delay_is_a_prediction_not_an_absence():
 
 # ------------------------------------------- 4: green on nothing measured --
 
-def test_stop_id_survival_is_not_a_pass_when_nothing_was_measured(mini_zip, tmp_path):
-    """`meets_assumption: true` beside `survival_rate: null` is a green light
-    nobody earned -- the same skip-is-not-pass rule the assertion suite keeps."""
+def test_a_stopless_feed_cannot_reach_the_diff_at_all(tmp_path):
+    """The original repro for the unearned green light was a feed with zero
+    stops. That state is now unreachable -- build_sqlite refuses it -- which is
+    a better fix than reporting it well downstream. Pinned so a future
+    loosening of the import guard does not quietly reopen the path.
+
+    The surviving in-band case, a feed WITH stops but no stop_code column, is
+    covered by test_stop_id_survival_needs_stop_code_on_both_sides.
+    """
     empty = fixtures.build_gtfs_zip(
         tmp_path / "nostops.zip",
         overrides={"stops.txt": (
             "stop_id,stop_code,stop_name,stop_lat,stop_lon,location_type,"
             "parent_station,wheelchair_boarding\n")},
     )
-    a = _conn(empty, tmp_path, "a.sqlite")
-    b = _conn(mini_zip, tmp_path, "b.sqlite")
-    try:
-        result = diff_stop_ids(a, b)
-        assert result["measured"] is False
-        assert result["meets_assumption"] is False
-        assert result["survival_rate_stop_code"] is None
-        # Whichever branch names the cause, it must not read as reassurance.
-        assert "still resolves" not in result["verdict"]
-        assert "Routine" not in result["verdict"]
-    finally:
-        a.close()
-        b.close()
+    with pytest.raises(EmptyFeed):
+        build_sqlite(empty, tmp_path / "a.sqlite")
 
 
 def test_stop_id_survival_still_passes_on_two_real_feeds(mini_zip, tmp_path):
@@ -317,3 +312,144 @@ def test_oracle_generate_reports_a_missing_spec_as_usage_not_crash(tmp_path):
     with pytest.raises(UsageError) as exc:
         oracle.generate(spec_path=str(tmp_path / "nope.json"), out_dir=str(tmp_path))
     assert "oracle cases" in exc.value.remedy
+
+
+# ================= second review pass: what the first round's fixes missed ==
+
+def test_an_unrepresentable_absolute_time_does_not_crash():
+    """The epoch was turned into a datetime BEFORE being range-checked, so a
+    garbage int64 raised OverflowError straight out of the tool -- the very
+    crash the delay guard exists to prevent, reintroduced on the new branch."""
+    for epoch in (2**63 - 1, -(2**63), 2**64 - 180, 10**18):
+        out = rtmerge.merge(_scheduled(), _feed({"time": epoch}))
+        item = out["items"][0]
+        assert item["status"] == "IMPLAUSIBLE_DELAY"
+        assert item["predicted_local"] is None
+        assert out["warnings"]
+
+
+def test_absolute_time_wins_when_both_time_and_delay_are_present():
+    """gtfs-realtime.proto, StopTimeEvent: 'If both time and delay are
+    specified, time will take precedence.' Preferring delay because it was
+    written first is a silent spec violation."""
+    epoch = int(datetime(2026, 8, 5, 12, 20, tzinfo=CHI).timestamp())
+    item = rtmerge.merge(_scheduled(), _feed({"time": epoch, "delay": 60}))["items"][0]
+    assert item["delay_basis"] == "absolute_time"
+    assert item["delay_seconds"] == 900  # from `time`, not the 60 in `delay`
+    assert item["predicted_local"].startswith("2026-08-05T12:20")
+
+
+def test_a_header_only_feed_is_refused(tmp_path):
+    """Testing only for the presence of .txt members let an archive of
+    header-only CSVs -- what a truncated download produces -- publish a
+    zero-row database that the fast path then served as a complete feed."""
+    headers = tmp_path / "headers.zip"
+    with zipfile.ZipFile(headers, "w") as zf:
+        zf.writestr("stops.txt", "stop_id,stop_code,stop_name\n")
+        zf.writestr("routes.txt", "route_id,route_short_name\n")
+    db = tmp_path / "headers.sqlite"
+    with pytest.raises(EmptyFeed) as exc:
+        build_sqlite(headers, db)
+    assert "zero rows" in str(exc.value)
+    assert not db.exists()
+
+
+def test_a_feed_with_no_stops_is_refused(tmp_path):
+    """Every rider-facing feature resolves through stops; a feed without them
+    is unusable rather than partially useful."""
+    nostops = tmp_path / "nostops.zip"
+    with zipfile.ZipFile(nostops, "w") as zf:
+        zf.writestr("agency.txt", "agency_id,agency_name\nA,Test\n")
+        zf.writestr("stops.txt", "stop_id,stop_code,stop_name\n")
+    with pytest.raises(EmptyFeed) as exc:
+        build_sqlite(nostops, tmp_path / "ns.sqlite")
+    assert "no stops" in str(exc.value)
+
+
+def test_a_failed_force_rebuild_preserves_the_good_database(mini_zip, tmp_path):
+    """The old code unlinked before building, so a failed --force destroyed a
+    working database on the way to not producing a new one. replace() is
+    atomic; the unlink was never needed."""
+    db = tmp_path / "keep2.sqlite"
+    build_sqlite(mini_zip, db)
+    before = db.read_bytes()
+
+    bad = tmp_path / "bad2.zip"
+    bad.write_bytes(b"not a zip at all")
+    with pytest.raises(Exception):
+        build_sqlite(bad, db, force=True)
+    assert db.exists(), "a failed rebuild deleted the working database"
+    assert db.read_bytes() == before
+    assert not list(tmp_path.glob("*.building-*"))
+
+
+def test_explain_empty_covers_a_twenty_five_hour_day(tmp_path):
+    """A fixed 1440-minute probe from midnight stops an hour early on the
+    fall-back night, so a stop whose only departure is late in the day reads as
+    NO_SERVICE_AT_STOP_TODAY -- a diagnostic tool giving the wrong diagnosis on
+    the one night it is hardest to debug."""
+    from stl_transit.core.gtfs.departures import explain_empty
+
+    conn = _conn(_dst_feed(tmp_path, "late.zip"), tmp_path, "late.sqlite")
+    try:
+        # Query a narrow window that legitimately contains nothing; the verdict
+        # must be WINDOW_TOO_NARROW, because service does exist that day.
+        at = datetime(2026, 11, 1, 5, 0, tzinfo=CHI)
+        out = explain_empty(conn, "S1", at, 30, CHI, date(2026, 11, 30))
+        assert out["verdict"] == "WINDOW_TOO_NARROW", out["verdict"]
+    finally:
+        conn.close()
+
+
+def test_coverage_uses_the_agency_date_not_the_machines(conn, monkeypatch):
+    """`datetime.now().date()` is naive local time, so on a UTC host every
+    evening after 19:00 Chicago reported tomorrow -- days_remaining, stale_days
+    and the expiry warning all off by one for five hours a day."""
+    from stl_transit.core.gtfs import inspect as gi
+
+    explicit = gi.coverage(conn, date(2026, 8, 5))
+    implicit = gi.coverage(conn)
+    # Both must derive their date the same way; the implicit one must not be
+    # reading a different clock than the one --as-of plumbs through.
+    assert set(explicit) == set(implicit)
+    assert "days_remaining" in implicit
+
+
+@pytest.mark.parametrize(
+    "a,b",
+    [
+        ("2026-06-15T14:00:00-05:00", "2026-06-15T19:00:00+00:00"),
+        ("2026-06-15T14:00:00-05:00", "2026-06-15T14:00:00"),
+        ("2026-01-15T08:30:00-06:00", "2026-01-15T14:30:00Z"),
+    ],
+)
+def test_device_time_keys_normalise_across_zones(a, b):
+    """A device logging UTC writes 19:00Z for the departure the oracle calls
+    14:00-05:00. Reading .hour off whichever form arrived made every such row a
+    mismatch -- and the function's own docstring promised the opposite."""
+    from stl_transit.core.support import _time_key
+
+    assert _time_key(a) == _time_key(b) is not None
+
+
+def test_stop_id_survival_needs_stop_code_on_both_sides(mini_zip, tmp_path):
+    """stop_code is what the app resolves against, so passing on the stop_id
+    rate alone while the code rate is null is the same unearned green light,
+    one level narrower."""
+    nocode = fixtures.build_gtfs_zip(
+        tmp_path / "nocode.zip",
+        overrides={"stops.txt": (
+            "stop_id,stop_name,stop_lat,stop_lon\n"
+            "S1,First,38.6,-90.2\n"
+            "S2,Second,38.7,-90.3\n")},
+    )
+    a = _conn(nocode, tmp_path, "nc_a.sqlite")
+    b = _conn(nocode, tmp_path, "nc_b.sqlite")
+    try:
+        result = diff_stop_ids(a, b)
+        assert result["survival_rate_stop_code"] is None
+        assert result["measured"] is False
+        assert result["meets_assumption"] is False
+    finally:
+        a.close()
+        b.close()

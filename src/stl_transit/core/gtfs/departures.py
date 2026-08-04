@@ -270,10 +270,22 @@ def explain_empty(conn: sqlite3.Connection, stop: str, at: datetime,
                           "Usually a retired stop awaiting cleanup."}
     add("stop_has_any_service", True, f"{ever} stop_times rows reference this stop.")
 
-    wide = departures(conn, stop, at.replace(hour=0, minute=0, second=0),
-                      window_minutes=24 * 60, tz=tz, limit=500)
+    # A local day is not always 24 hours. On fall-back it is 25, so a fixed
+    # 1440-minute probe from midnight stops an hour early and a stop whose only
+    # departure is at 23:30 reads as NO_SERVICE_AT_STOP_TODAY -- a diagnostic
+    # tool confidently giving the wrong diagnosis on the one night a year it is
+    # hardest to debug. Measure to the next local midnight instead.
+    day_start = at.replace(hour=0, minute=0, second=0, microsecond=0)
+    next_midnight = (day_start + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    day_minutes = int(
+        (next_midnight.astimezone(timezone.utc) - day_start.astimezone(timezone.utc))
+        .total_seconds() // 60
+    )
+    wide = departures(conn, stop, day_start, window_minutes=day_minutes, tz=tz, limit=500)
     if wide["total"] == 0:
-        add("service_on_this_date", False, "No departures anywhere in the 24h day.")
+        add("service_on_this_date", False,
+            f"No departures anywhere in the {day_minutes}-minute local day.")
         return {"verdict": "NO_SERVICE_AT_STOP_TODAY", "checks": checks,
                 "remedy": "The stop is served, but not on this day of the week. "
                           "Check weekend/holiday patterns."}

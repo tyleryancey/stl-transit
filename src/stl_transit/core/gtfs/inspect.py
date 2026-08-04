@@ -8,6 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from ...io.clock import now_local
 from ...io.db import zip_members
 from .calendar import parse_ymd
 
@@ -187,7 +188,11 @@ def coverage(conn: sqlite3.Connection, today: date | None = None) -> dict[str, A
     the number to surveil.
     """
     tables = _tables(conn)
-    today = today or datetime.now().date()
+    # The AGENCY's date, not the machine's. `datetime.now()` is naive local
+    # time, so on a UTC host every evening after 19:00 Chicago it reports
+    # tomorrow -- and days_remaining, stale_days and the expiry warning are all
+    # off by one for five hours a day. It also silently ignored `--as-of`.
+    today = today or now_local().date()
     starts, ends = [], []
     if "calendar" in tables:
         row = conn.execute("SELECT MIN(start_date), MAX(end_date) FROM calendar").fetchone()
