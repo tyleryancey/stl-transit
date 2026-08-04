@@ -390,11 +390,21 @@ def _stop_ids(conn_a: sqlite3.Connection, conn_b: sqlite3.Connection,
     by_id, by_code = block("stop_id"), block("stop_code")
     id_rate, code_rate = by_id["survival_rate"], by_code["survival_rate"]
     worst = min([r for r in (id_rate, code_rate) if r is not None], default=None)
-    meets = worst is None or worst >= STOP_CODE_SURVIVAL_FLOOR
+    # `measured` is not decoration. When neither rate could be computed -- an
+    # empty feed, a missing stop_code column -- the honest answer is "not
+    # measured", and `meets_assumption: true` beside `survival_rate: null` is a
+    # green light nobody earned. The same skip-is-not-pass rule the assertion
+    # suite follows.
+    measured = worst is not None
+    meets = measured and worst >= STOP_CODE_SURVIVAL_FLOOR
 
     if not has_code["a"] or not has_code["b"]:
         verdict = ("One of these feeds has no stop_code column at all. The Stop ID "
                    "entry screen has nothing to resolve against in that snapshot.")
+    elif not measured:
+        verdict = ("NOT MEASURED: neither survival rate could be computed, which "
+                   "usually means the older feed has no stops. This is not a pass -- "
+                   "check that both snapshots imported correctly with `stl gtfs stats`.")
     elif meets and worst == 1.0:
         verdict = "Every stop_id and stop_code in the older feed still resolves."
     elif meets:
@@ -414,6 +424,7 @@ def _stop_ids(conn_a: sqlite3.Connection, conn_b: sqlite3.Connection,
         "stop_code": by_code,
         "stop_code_column_present": has_code,
         "floor": STOP_CODE_SURVIVAL_FLOOR,
+        "measured": measured,
         "meets_assumption": meets,
         "assumption": "stop_ids_stable (spec 6.10)",
         "verdict": verdict,

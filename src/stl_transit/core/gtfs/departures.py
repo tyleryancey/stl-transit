@@ -89,9 +89,10 @@ def departures(
     # Window arithmetic in UTC: adding a timedelta to a zone-aware datetime is
     # wall-clock arithmetic, so a 90-minute window spanning 02:00 on a DST
     # night would otherwise cover 30 or 150 real minutes.
-    window_end = (at.astimezone(timezone.utc) + timedelta(minutes=window_minutes)).astimezone(
-        at.tzinfo or tz
-    )
+    at_utc = at.astimezone(timezone.utc)
+    window_end_utc = at_utc + timedelta(minutes=window_minutes)
+    # Local rendering of the same instant, for the human-readable query block.
+    window_end = window_end_utc.astimezone(at.tzinfo or tz)
 
     st_cols = {r[1] for r in conn.execute("PRAGMA table_info(stop_times)")}
     trip_cols = {r[1] for r in conn.execute("PRAGMA table_info(trips)")}
@@ -154,7 +155,14 @@ def departures(
             if service_id not in services:
                 continue
             when = absolute_time(sd, secs, tz)
-            if at <= when <= window_end:
+            # Compare as absolute instants. Two datetimes sharing a tzinfo
+            # object compare and subtract by WALL CLOCK in CPython, so on a DST
+            # transition night a departure genuinely inside the window falls
+            # outside it -- silently dropped, with no error anywhere. Computing
+            # window_end in UTC (above) was not enough on its own; the
+            # comparison that consumes it has to agree.
+            when_utc = when.astimezone(timezone.utc)
+            if at_utc <= when_utc <= window_end_utc:
                 items.append(
                     {
                         "route_id": rec["route_id"],
@@ -174,7 +182,9 @@ def departures(
                         "gtfs_time": format_gtfs_time(secs),
                         "departure_local": when.isoformat(),
                         "departure_utc": when.astimezone(timezone.utc).isoformat(),
-                        "minutes_away": int((when - at).total_seconds() // 60),
+                        # Same reason: elapsed time is measured in UTC, or a
+                        # bus 45 minutes out reports as -15 on a DST night.
+                        "minutes_away": int((when_utc - at_utc).total_seconds() // 60),
                         "after_midnight": secs >= 86_400,
                     }
                 )

@@ -103,10 +103,16 @@ def active_services(conn: sqlite3.Connection, on: date) -> dict[str, Any]:
     added: set[str] = set()
     removed: set[str] = set()
     if "calendar_dates" in tables:
-        for row in conn.execute(
-            "SELECT service_id, exception_type FROM calendar_dates WHERE date = ?", (key,)
-        ):
-            (added if str(row[1]).strip() == "1" else removed).add(row[0])
+        # A header-only calendar_dates.txt is legal GTFS and does happen -- an
+        # agency with no exceptions this pick still ships the file. The import
+        # gives an empty file a placeholder column, so querying service_id
+        # blind raises OperationalError on a feed that is perfectly valid.
+        cd_cols = {r[1] for r in conn.execute("PRAGMA table_info(calendar_dates)")}
+        if {"service_id", "exception_type", "date"} <= cd_cols:
+            for row in conn.execute(
+                "SELECT service_id, exception_type FROM calendar_dates WHERE date = ?", (key,)
+            ):
+                (added if str(row[1]).strip() == "1" else removed).add(row[0])
 
     return {
         "date": on.isoformat(),

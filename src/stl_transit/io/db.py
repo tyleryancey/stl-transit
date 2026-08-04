@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import sqlite3
 import time
 import zipfile
 from pathlib import Path
 from typing import Any, Iterator
 
-from ..errors import QueryFailed, QueryTimeout, UnsafeQuery
+from ..errors import EmptyFeed, QueryFailed, QueryTimeout, UnsafeQuery
 
 # Files we index. Anything else in the zip is still imported generically.
 KNOWN_FILES = [
@@ -66,8 +67,21 @@ def build_sqlite(zip_path: Path, db_path: Path, force: bool = False) -> dict[str
         db_path.unlink()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Build into a temporary file and rename only on success. `sqlite3.connect`
+    # CREATES the file the instant it is called -- before a single row is read
+    # -- so building in place left an empty database behind whenever the import
+    # failed: a corrupt zip, an interrupted run, a snapshot of the wrong kind.
+    # Every later call then took the `db_path.exists()` fast path above and
+    # served that empty file as a complete feed. Nothing errored. `diff` duly
+    # reported that all 5,118 stops had disappeared.
+    #
+    # rename() is atomic within a filesystem, so a reader either sees the old
+    # database or the finished new one, never a half-built one.
+    tmp_path = db_path.with_name(db_path.name + f".building-{os.getpid()}")
+    tmp_path.unlink(missing_ok=True)
+
     counts: dict[str, int] = {}
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(tmp_path)
     conn.execute("PRAGMA journal_mode=OFF")
     conn.execute("PRAGMA synchronous=OFF")
     try:
@@ -114,8 +128,29 @@ def build_sqlite(zip_path: Path, db_path: Path, force: bool = False) -> dict[str
                 except sqlite3.OperationalError:
                     pass  # column absent in this feed; not fatal
         conn.commit()
+    except BaseException:
+        # Includes KeyboardInterrupt: a Ctrl-C mid-import must not leave a
+        # plausible-looking empty database where a real one is expected.
+        conn.close()
+        tmp_path.unlink(missing_ok=True)
+        raise
     finally:
         conn.close()
+
+    if not counts:
+        # An archive with no .txt members is not a GTFS feed. Publishing an
+        # empty database here is what made a broken import indistinguishable
+        # from an agency that deleted every stop.
+        tmp_path.unlink(missing_ok=True)
+        raise EmptyFeed(
+            f"No GTFS .txt files found in {zip_path.name}; refusing to build an "
+            "empty database.",
+            remedy="Check that this snapshot is a GTFS zip and not a realtime "
+            "protobuf or an HTML error page saved with a .zip name. "
+            "`stl snapshot show <id>` reports the stored content type.",
+            zip_path=str(zip_path),
+        )
+    tmp_path.replace(db_path)
     return {"db_path": str(db_path), "rebuilt": True, "tables": counts}
 
 
@@ -276,6 +311,26 @@ def _classify(exc: sqlite3.DatabaseError, sql: str, elapsed: float, budget: floa
             f"Statement denied by the read-only authorizer: {text}",
             remedy="This database is opened read-only. Writes, ATTACH, PRAGMA and "
             "extension loading are refused at the driver. Rewrite as a SELECT or WITH.",
+            sql=sql[:400],
+        )
+    # VACUUM, REINDEX and ANALYZE are refused by mode=ro rather than by the
+    # authorizer, so they arrive as "readonly database" or "attempt to write".
+    # Without this they fell through to QUERY_FAILED and were answered with
+    # advice about checking column names -- true of a typo, useless here.
+    if "readonly database" in lowered or "attempt to write" in lowered:
+        return UnsafeQuery(
+            f"Statement requires write access: {text}",
+            remedy="The feed database is opened read-only and is a regenerable "
+            "cache -- rebuild it with `stl gtfs import --force` rather than "
+            "trying to modify it in place.",
+            sql=sql[:400],
+        )
+    if "out of memory" in lowered or "too big" in lowered or "string or blob" in lowered:
+        return QueryFailed(
+            f"Query exceeded a size limit: {text}",
+            remedy="Something in this query allocates more than SQLite will hold "
+            "(a very large randomblob/zeroblob, or an unbounded recursive CTE). "
+            "Bound it, or aggregate instead of materialising rows.",
             sql=sql[:400],
         )
     return QueryFailed(

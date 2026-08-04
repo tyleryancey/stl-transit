@@ -1234,13 +1234,21 @@ def support_diff_device(expected_json: str, actual_json: str) -> dict[str, Any]:
     """
     def _load(value: str) -> Any:
         p = Path(value).expanduser()
-        text = p.read_text() if p.is_file() else value
+        try:
+            text = p.read_text() if p.is_file() else value
+        except OSError as exc:
+            raise UsageError(
+                f"Could not read {p}: {exc}",
+                remedy="Check the path, or paste the JSON inline instead.",
+            ) from None
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
             raise UsageError(
                 f"Could not parse as JSON: {exc}",
-                remedy="Pass a path to a .json file or a valid JSON string.",
+                remedy="Pass a path to a .json file or a valid JSON string. If you "
+                "meant a path, note that this argument accepts inline JSON too, so a "
+                "typo'd path is read as JSON text rather than reported as missing.",
             ) from None
 
     return _ok(support.diff_device(_load(expected_json), _load(actual_json)))

@@ -172,7 +172,7 @@ drop into cron or a GitHub Action without anyone parsing output.
 
 ```bash
 .venv/bin/pip install -e '.[dev]'
-.venv/bin/pytest -q     # 403 tests, no network
+.venv/bin/pytest -q     # 420 tests, no network
 ```
 
 Everything runs against miniature synthetic feeds in `tests/fixtures.py` — three
@@ -190,6 +190,18 @@ Two suites go further than unit coverage:
 - `scripts/verify_fixes.py` re-runs the 2026-08-03 audit's failures against a
   real snapshot. The synthetic feeds have no negative RT delays and no
   489k-row table to time out on, so these checks cannot be unit tests.
+- `scripts/smoke_mcp.py` speaks real JSON-RPC to `stl-mcp` over stdio.
+  Importing the tool functions proves the wiring but not that the server
+  starts, negotiates a protocol version, or serializes its schemas — and those
+  failures all happen before any of this code runs.
+
+`tests/test_review_fixes.py` is worth reading on its own: it pins a class of bug
+that appeared four separate times in this codebase. Adding a `timedelta` to a
+zone-aware datetime, or subtracting two datetimes that share a `tzinfo` object,
+is *wall-clock* arithmetic in Python. It is correct on 363 days a year. On the
+fall-back night it made a bus 45 minutes away report as **−15 minutes** and
+disappear from the board entirely. If you touch time arithmetic here, do it in
+UTC and add a test dated in March or November.
 
 ## Evaluations
 

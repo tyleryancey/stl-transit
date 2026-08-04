@@ -92,6 +92,15 @@ class StopNotFound(StlError):
     code = "STOP_NOT_FOUND"
 
 
+class EmptyFeed(StlError):
+    """An archive produced no GTFS tables. Raised rather than publishing an
+    empty database, because a broken import that succeeds quietly is
+    indistinguishable from an agency that deleted every stop -- and the tools
+    downstream will confidently report the latter."""
+
+    code = "EMPTY_FEED"
+
+
 class PageNotFound(StlError):
     code = "PAGE_NOT_FOUND"
 

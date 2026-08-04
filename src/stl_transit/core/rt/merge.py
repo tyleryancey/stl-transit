@@ -35,13 +35,21 @@ def index_trip_updates(decoded: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _stop_delay(tu: dict[str, Any], stop_id: str, stop_sequence: str | None) -> tuple[int | None, str]:
-    """Find the delay applying to one stop.
+def _stop_delay(
+    tu: dict[str, Any], stop_id: str, stop_sequence: str | None
+) -> tuple[int | None, int | None, str]:
+    """Find the prediction applying to one stop: (delay_seconds, epoch, relationship).
 
-    GTFS-RT allows a producer to give delay at only some stops; the spec says
-    a StopTimeUpdate applies until the next one. So: prefer an exact stop
-    match, then fall back to the trip-level delay, then to the last update
-    before this stop.
+    GTFS-RT allows a producer to give a prediction at only some stops; the spec
+    says a StopTimeUpdate applies until the next one. So: prefer an exact stop
+    match, then fall back to the trip-level delay.
+
+    A StopTimeEvent may carry EITHER a `delay` relative to the schedule OR an
+    absolute `time` as a POSIX timestamp, and the spec treats them as equally
+    valid. An earlier version recognised `time` and returned nothing for it,
+    with a comment claiming the caller handled it -- the caller had no such
+    branch, so those stops were rendered as `realtime: true` carrying the
+    scheduled time. A rider was shown a scheduled time labelled live.
     """
     updates = tu.get("stop_time_update", []) or []
     for u in updates:
@@ -50,15 +58,16 @@ def _stop_delay(tu: dict[str, Any], stop_id: str, stop_sequence: str | None) -> 
         ):
             rel = u.get("schedule_relationship", "SCHEDULED")
             if rel == "SKIPPED":
-                return None, "SKIPPED"
+                return None, None, "SKIPPED"
             event = u.get("departure") or u.get("arrival") or {}
-            if "delay" in event:
-                return int(event["delay"]), rel
-            if "time" in event:
-                return None, rel  # absolute time; handled by caller
-    if "delay" in tu:
-        return int(tu["delay"]), "SCHEDULED"
-    return None, "NO_DATA"
+            if event.get("delay") is not None:
+                return int(event["delay"]), None, rel
+            if event.get("time") is not None:
+                return None, int(event["time"]), rel
+            return None, None, rel
+    if tu.get("delay") is not None:
+        return int(tu["delay"]), None, "SCHEDULED"
+    return None, None, "NO_DATA"
 
 
 def merge(scheduled: dict[str, Any], decoded: dict[str, Any] | None) -> dict[str, Any]:
@@ -90,12 +99,40 @@ def merge(scheduled: dict[str, Any], decoded: dict[str, Any] | None) -> dict[str
             rec["status"] = "SCHEDULED_ONLY"
         else:
             matched += 1
-            delay, rel = _stop_delay(tu, rec["stop_id"], rec.get("stop_sequence"))
+            delay, epoch, rel = _stop_delay(tu, rec["stop_id"], rec.get("stop_sequence"))
             rec["realtime"] = True
             rec["status"] = rel
+            base = datetime.fromisoformat(rec["departure_local"])
+            zone = base.tzinfo if isinstance(base.tzinfo, ZoneInfo) else AGENCY_TZ
             if rel == "SKIPPED":
                 rec["predicted_local"] = None
-            elif delay is not None and not _plausible_delay(delay):
+            elif epoch is not None:
+                # Absolute prediction. Derive the delay from it rather than the
+                # other way round, so downstream code has one shape to handle.
+                predicted = datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone(zone)
+                derived = int(
+                    (predicted.astimezone(timezone.utc) - base.astimezone(timezone.utc))
+                    .total_seconds()
+                )
+                if not _plausible_delay(derived):
+                    rec["status"] = "IMPLAUSIBLE_DELAY"
+                    rec["delay_seconds"] = derived
+                    rec["predicted_local"] = None
+                    warnings.append(
+                        f"Trip {rec['trip_id']} gave an absolute time implying "
+                        f"{derived}s of delay, outside +/-{MAX_PLAUSIBLE_DELAY_SECONDS}s."
+                    )
+                else:
+                    rec["delay_seconds"] = derived
+                    rec["delay_basis"] = "absolute_time"
+                    rec["predicted_local"] = predicted.isoformat()
+                    rec["minutes_away_predicted"] = rec["minutes_away"] + round(derived / 60)
+            elif delay is None:
+                # Matched a TripUpdate, but it carries no prediction for this
+                # stop. Say so, rather than let a scheduled time pass for live.
+                rec["status"] = rel if rel != "SCHEDULED" else "NO_PREDICTION"
+                rec["predicted_local"] = None
+            elif not _plausible_delay(delay):
                 # A delay outside this range is a decoder fault, not a late bus.
                 # Report it as a data problem rather than rendering a departure
                 # in the year 584 billion -- or crashing on OverflowError.
@@ -107,16 +144,16 @@ def merge(scheduled: dict[str, Any], decoded: dict[str, Any] | None) -> dict[str
                     f"+/-{MAX_PLAUSIBLE_DELAY_SECONDS}s. Treated as no prediction. "
                     "A value near 2^64 means an unsigned decode of a signed field."
                 )
-            elif delay is not None:
+            else:
                 rec["delay_seconds"] = delay
-                base = datetime.fromisoformat(rec["departure_local"])
+                rec["delay_basis"] = "delay"
                 # Add in UTC, then convert back through the agency zone. Adding
                 # to a fixed-offset datetime keeps a stale offset across a DST
                 # boundary, so a bus predicted past 02:00 on a transition night
                 # would be reported an hour off.
-                predicted = (base.astimezone(timezone.utc) + timedelta(seconds=delay)).astimezone(
-                    base.tzinfo if isinstance(base.tzinfo, ZoneInfo) else AGENCY_TZ
-                )
+                predicted = (
+                    base.astimezone(timezone.utc) + timedelta(seconds=delay)
+                ).astimezone(zone)
                 rec["predicted_local"] = predicted.isoformat()
                 rec["minutes_away_predicted"] = rec["minutes_away"] + round(delay / 60)
         items.append(rec)

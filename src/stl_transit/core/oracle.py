@@ -80,7 +80,26 @@ def generate(spec_path: str | None = None, out_dir: str = "fixtures",
 
     bindings: dict[str, dict[str, Any]] = {}
     if spec_path:
-        bindings = json.loads(Path(spec_path).expanduser().read_text())
+        spec = Path(spec_path).expanduser()
+        # A bare FileNotFoundError reaches an MCP client as code UNEXPECTED with
+        # no remedy, which is the difference between the model fixing its path
+        # and the model giving up.
+        if not spec.is_file():
+            raise UsageError(
+                f"No binding spec at {spec}.",
+                remedy="Pass --spec pointing at a JSON file mapping case ids to "
+                'inputs, e.g. {"weekday_midday": {"stop": "15111", '
+                '"at": "2026-08-05T12:00:00"}}. Run `stl oracle cases` for the ids.',
+                spec_path=str(spec),
+            )
+        try:
+            bindings = json.loads(spec.read_text())
+        except json.JSONDecodeError as exc:
+            raise UsageError(
+                f"Binding spec at {spec} is not valid JSON: {exc}",
+                remedy="Fix the JSON syntax; the file maps case ids to input objects.",
+                spec_path=str(spec),
+            ) from None
 
     written, skipped = [], []
     for c in CASES:
@@ -164,8 +183,20 @@ def verify(fixtures_dir: str = "fixtures", snapshot: str | None = None,
             "--spec <bindings.json>`, or point --fixtures at the right directory.",
             fixtures_dir=str(d),
         )
+    fixtures = sorted(d.glob("*.json"))
+    if not fixtures:
+        # `ok: true, checked: 0` is the worst possible answer here: a scheduled
+        # drift check pointed at the wrong directory would stay green forever
+        # while verifying nothing at all.
+        raise UsageError(
+            f"No fixture files found in {d}.",
+            remedy="Generate them with `stl oracle generate --out <dir> --spec "
+            "<bindings.json>`, or point --fixtures at the directory holding the "
+            "committed goldens (normally the tool repo's test resources).",
+            fixtures_dir=str(d),
+        )
     results, drifted = [], 0
-    for path in sorted(d.glob("*.json")):
+    for path in fixtures:
         golden = json.loads(path.read_text())
         inp = golden["input"]
         expected_error = golden.get("expected_error")
