@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "stl-transit": {
+      "command": "/absolute/path/to/stl-transit/.venv/bin/stl-mcp",
+      "env": {
+        "STL_HOME": "/absolute/path/to/stl-transit/.data"
+      }
+    }
+  }
+}

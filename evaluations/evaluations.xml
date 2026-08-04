@@ -1,0 +1,42 @@
+<evaluation>
+  <qa_pair>
+    <question>Using GTFS snapshot gtfs-20260803T190539Z-f2d721 (source metro_gtfs): find the largest departure_time value anywhere in stop_times and the stop it is served at, then ask for scheduled departures at that stop for the instant 2026-08-09T01:30:00 in America/Chicago with a 15-minute window. Exactly one departure comes back. What is its trip_id?</question>
+    <answer>3409236</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>In GTFS snapshot gtfs-20260803T190539Z-f2d721, how many rows of trips.txt are scheduled to operate on service date 2026-08-08? Resolve the active service_ids through calendar.txt and calendar_dates.txt together, not calendar.txt alone.</question>
+    <answer>2767</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>GTFS snapshot gtfs-20260803T190539Z-f2d721 contains two routes whose route_long_name is "MetroLink Red Line". Exactly one of them has trips scheduled on Monday 2026-08-17. What is that route_id?</question>
+    <answer>19870R</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>In GTFS snapshot gtfs-20260803T190539Z-f2d721, how many distinct stop_ids are called at by at least one trip belonging to a route with route_type "2" (MetroLink)?</question>
+    <answer>38</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Run the assumption suite against GTFS snapshot gtfs-20260803T190539Z-f2d721. The stop_code_format assumption measures stop_code values against the pattern ^[0-9]{4,5}$ and reports an observed match rate below 1.0. How many stop_code values in that snapshot fail the pattern?</question>
+    <answer>24</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>In GTFS snapshot gtfs-20260803T190539Z-f2d721, take the stop number Metro publishes on its stop-sign photo — the one the stop-resolve tool checks as its known example — and ask for scheduled departures at that stop starting at 2026-08-03T00:00:00 America/Chicago with a window of 1440 minutes. What total does the departures result report?</question>
+    <answer>72</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Realtime snapshot rt-20260803T190604Z-5ceebf (source metro_rt_trips) carries 144 entities, all of them TripUpdates. How many of those TripUpdates report trip.schedule_relationship = CANCELED?</question>
+    <answer>14</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Across every StopTimeEvent in realtime snapshot rt-20260803T190604Z-5ceebf, what is the most negative delay value in seconds? (delay is a signed int32; a negative value means the vehicle is running early.)</question>
+    <answer>-240</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>Realtime snapshot rt-20260803T190604Z-5ceebf is a single protobuf FeedMessage. How many top-level fields does that message carry on the wire?</question>
+    <answer>145</answer>
+  </qa_pair>
+  <qa_pair>
+    <question>The agency timezone declared in GTFS snapshot gtfs-20260803T190539Z-f2d721 is America/Chicago, and GTFS measures a service day from noon minus twelve hours rather than from local midnight. For service date 2027-03-14 — the US spring-forward day — at what instant does that service day begin? Give the local ISO-8601 timestamp including its UTC offset.</question>
+    <answer>2027-03-13T23:00:00-06:00</answer>
+  </qa_pair>
+</evaluation>

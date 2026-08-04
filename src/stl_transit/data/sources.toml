@@ -1,0 +1,113 @@
+# Feed and page registry. Adding an agency is a config edit, never a code change.
+
+[http]
+user_agent = "stl-transit-dev/0.1 (+https://github.com/tyleryancey/stl-transit)"
+min_interval_seconds = 2.0
+timeout_seconds = 60
+max_retries = 3
+
+# ---------------------------------------------------------------- Missouri ---
+# Bi-State Development Agency dba Metro Transit. Covers MetroBus in BOTH
+# Missouri and Illinois (St. Clair County service is operated by Metro under
+# contract, so it lives in this feed), MetroLink light rail, and Loop Trolley.
+# Terms: non-exclusive, limited, REVOCABLE. No trademark use. Missouri law.
+
+[feeds.metro_gtfs]
+kind = "gtfs"
+url = "https://www.metrostlouis.org/Transit/google_transit.zip"
+agency = "Metro Transit - St. Louis"
+timezone = "America/Chicago"
+terms_url = "https://www.metrostlouis.org/developer-resources/"
+region = "MO+IL"
+
+[feeds.metro_rt_trips]
+kind = "gtfs-rt"
+entity = "trip_updates"
+url = "https://www.metrostlouis.org/RealTimeData/StlRealTimeTrips.pb"
+static_source = "metro_gtfs"
+
+[feeds.metro_rt_vehicles]
+kind = "gtfs-rt"
+entity = "vehicle_positions"
+url = "https://www.metrostlouis.org/RealTimeData/StlRealTimeVehicles.pb"
+static_source = "metro_gtfs"
+
+[feeds.metro_rt_alerts]
+kind = "gtfs-rt"
+entity = "alerts"
+url = "https://www.metrostlouis.org/RealTimeData/StlRealTimeAlerts.pb"
+static_source = "metro_gtfs"
+
+# ---------------------------------------------------------------- Illinois ---
+# Madison County Transit runs its own buses on the Illinois side and is NOT in
+# Metro's feed. MCT publishes no developer page; the URL below is unresolved.
+# Resolve via Mobility Database / Transitland, then set `url` and drop
+# `unresolved`. `stl snapshot sources` reports it as blocked until then.
+
+[feeds.mct_gtfs]
+kind = "gtfs"
+url = ""
+unresolved = true
+agency = "Madison County Transit"
+timezone = "America/Chicago"
+terms_url = "https://www.mct.org/"
+region = "IL"
+discovery_notes = "Transitland Onestop ID f-madison~county~transit~il~us (historical: 29 routes, ~1312 stops). Also search mobilitydatabase.org for 'Madison County Transit'. Fallback: email MCT, (618) 797-4600."
+
+# Loop Trolley: SEASONAL (2026 season Apr 30 - Oct 25, Thu-Sun 11:00-19:00,
+# free, 10 stops). Operated by Bi-State and publishing identical developer
+# terms. Check whether its trips already live inside metro_gtfs before
+# resolving this as a separate source.
+[feeds.loop_trolley]
+kind = "gtfs"
+url = ""
+unresolved = true
+agency = "Loop Trolley"
+timezone = "America/Chicago"
+terms_url = "https://www.looptrolley.com/resources"
+seasonal = true
+discovery_notes = "Developer page at looptrolley.com/resources mirrors Metro's terms. First check `stl gtfs routes --source metro_gtfs` for a trolley route before adding."
+
+# ---------------------------------------------------------------- Mirrors ----
+[mirrors.mobility_database]
+feed_id = "mdb-190"
+feed_page = "https://mobilitydatabase.org/feeds/gtfs/mdb-190"
+files_base = "https://files.mobilitydatabase.org/mdb-190/"
+
+# ------------------------------------------------------------------ Pages ----
+# Human-readable sources the app bundles at build time. Hash the EXTRACTED
+# content, never raw HTML -- raw HTML changes on every request.
+
+[pages.fares]
+url = "https://www.metrostlouis.org/fares-and-passes/"
+extractor = "fare_table"
+fetch_interval_hours = 24
+
+[pages.holidays]
+url = "https://www.metrostlouis.org/holiday-schedules/"
+extractor = "holiday_table"
+fetch_interval_hours = 168
+
+[pages.purchase]
+url = "https://www.metrostlouis.org/nextgenfare/"
+extractor = "text"
+fetch_interval_hours = 24
+
+[pages.schedule_changes]
+url = "https://www.metrostlouis.org/upcoming-schedule-changes/"
+extractor = "pick_id"
+fetch_interval_hours = 24
+
+[pages.developer_terms]
+url = "https://www.metrostlouis.org/developer-resources/"
+extractor = "text"
+fetch_interval_hours = 168
+
+# noarchive/nosnippet page. Capture for reference only; never a live dependency.
+# The robots directives are the reason: Metro has asked not to have this page
+# cached or excerpted, and honouring that costs nothing since GTFS-RT alerts
+# are the live source anyway.
+[pages.rider_alerts]
+url = "https://www.metrostlouis.org/rider-alerts/"
+extractor = "alert_list"
+fetch_interval_hours = 24

@@ -1,0 +1,256 @@
+# The assumption registry (spec 6.10).
+#
+# The app depends on facts about the feed that Metro never promised. Each one
+# is a row here. Changing a THRESHOLD is a config edit alone; adding an
+# assumption is a config edit plus one measurement function in
+# core/assertions/__init__.py. Nothing about an assumption is hardcoded except
+# how its number is measured.
+#
+# Schema, per [assumptions.<id>]:
+#   title        one line, for `stl assert list`
+#   checks       what is measured, in the terms the report prints
+#   breaks       what stops working in the APP when this fails. Not "the check
+#                goes red" -- the user-visible consequence, because that is
+#                what decides whether you fix it tonight or next quarter.
+#   severity     critical | high | medium | opportunity
+#                "opportunity" watches for the feed getting BETTER. Such an
+#                assumption can never report `fail`, so it never trips exit 3
+#                in CI (spec 5) -- a suite that fails a build because upstream
+#                improved is a suite people disable.
+#   category     static | stability | realtime | web. Also the report's fixed
+#                sort order: what the feed says, then what changed since the
+#                baseline, then the two inputs that come from outside the feed.
+#   requires     inputs the check cannot run without: "baseline", "web_hashes",
+#                "rt_feeds". Missing input = `skip`, a third outcome distinct
+#                from pass and fail. A suite that reported "pass" when it
+#                measured nothing would be worse than no suite at all.
+#   why          why the app depends on it        \
+#   code_path    the code that breaks              > printed by `assert explain`
+#   remediation  what to do when it goes red      /
+#
+# Any OTHER key in a table is a tunable threshold. It is passed to the check
+# and echoed next to the observed value, so a red run always shows both
+# numbers: "stop_code coverage 0.982, threshold 0.99" is actionable, "FAIL" is
+# not.
+
+# ------------------------------------------------------------------ static ---
+# Facts readable from a single imported snapshot. No baseline, no network.
+
+[assumptions.stop_code_present]
+title = "stop_code is populated on virtually every boarding location"
+checks = "share of boarding locations (location_type 0 or empty) carrying a non-empty stop_code, against min_coverage"
+breaks = "The entire Stop-ID entry UX. A rider types the number from the sign and the app finds nothing."
+severity = "critical"
+category = "static"
+requires = []
+why = "The LP3 exposes no usable location API, so 'stops near me' is not buildable and typing the number off the sign is the ONLY way into the app. If that number is not in the feed there is no product."
+code_path = "core/gtfs/departures.resolve_stop, which tries stop_code before stop_id -- and its Kotlin twin, which must try them in the same order."
+remediation = "Run `stl gtfs stop-resolve` to see which field now carries sign numbers. If Metro moved them into stop_id, both resolvers change lookup order and every saved stop on every device needs migrating."
+min_coverage = 0.99
+
+[assumptions.stop_code_unique]
+title = "no stop_code is shared by two stops"
+checks = "count of stop_code values appearing on more than one stop, against max_duplicates"
+breaks = "The wrong stop is returned, silently. A rider gets a real-looking timetable for a stop across town."
+severity = "critical"
+category = "static"
+requires = []
+why = "resolve_stop returns the first match, so with a duplicated code the choice is arbitrary and the failure is invisible: departures appear, they are simply not this stop's. Every other failure mode in this suite at least shows an empty screen."
+code_path = "core/gtfs/departures.resolve_stop; the stop_code -> stop_id index emitted by `stl bundle stops-index`."
+remediation = "Identify the collisions with `stl gtfs query \"SELECT stop_code, COUNT(*) FROM stops GROUP BY stop_code HAVING COUNT(*) > 1\"`. If they are a station and its platform, prefer the parent; otherwise the resolver must disambiguate by name and report the ambiguity rather than guessing."
+max_duplicates = 0
+
+[assumptions.stop_code_format]
+title = "stop_codes match the format printed on the signs"
+checks = "share of non-empty stop_codes matching `pattern`, against min_match_rate"
+breaks = "Input validation and keypad design. A numeric-only entry screen cannot accept a code that is not numeric."
+severity = "high"
+category = "static"
+requires = []
+why = "The entry screen is the app's front door on a device with no touch keyboard worth the name. Digit count decides the keypad layout and when to auto-submit; a letter in a code invalidates the whole input widget."
+code_path = "The Stop ID entry screen's validator, and `stl gtfs stop-resolve`, which reports observed lengths for exactly this reason."
+remediation = "Widen `pattern` here once you have decided the new format is real, then widen the Kotlin validator to match. Check the offending codes first: a handful of odd values may be non-public stops that should be excluded from the bundled index instead."
+pattern = "^[0-9]{4,5}$"
+min_match_rate = 0.99
+
+[assumptions.feed_not_expiring]
+title = "the feed still has service data ahead of it"
+checks = "days between today and the last date any service is defined for, against min_days_remaining"
+breaks = "Silent blank screens. Past the last service date every query returns an empty list, which looks identical to 'no buses tonight'."
+severity = "critical"
+category = "static"
+requires = []
+why = "Metro publishes at quarterly picks and the feed's calendar ends at the next one. A tool that caches once and never refreshes does not error -- it goes quietly, plausibly blank, which is the worst failure mode available."
+code_path = "core/gtfs/inspect.coverage, surfaced as Provenance.stale_days on every result; the app's own staleness banner."
+remediation = "Fetch the new feed (`stl snapshot fetch metro_gtfs`), regenerate the oracle fixtures against it, and re-run `stl assert run` before shipping the rebuilt bundle."
+min_days_remaining = 7
+
+[assumptions.no_frequencies_file]
+title = "no headway-based service (frequencies.txt absent)"
+checks = "row count of frequencies.txt, against max_rows"
+breaks = "Headway-based trips need a whole second code path: trips in frequencies.txt have their stop_times expanded at intervals rather than read literally."
+severity = "high"
+category = "static"
+requires = []
+why = "The departures engine reads stop_times as literal scheduled times. That is only correct while every trip is literally scheduled. One frequencies.txt row makes it quietly wrong for the trips it covers, and the Kotlin port inherits the same hole."
+code_path = "core/gtfs/departures.departures, which joins stop_times directly and never expands headways."
+remediation = "If this fires, decide deliberately: implement headway expansion in both implementations, or exclude those trips and say so in the UI. Do not ship the current engine over a feed that has it."
+max_rows = 0
+
+[assumptions.max_time_bounded]
+title = "no stop_times value reaches 28:00:00"
+checks = "the numerically largest arrival/departure time in stop_times, against max_hour_exclusive"
+breaks = "Service-day arithmetic assumptions. The departures window looks two service dates back; a trip encoded past 48:00 would fall outside it entirely."
+severity = "high"
+category = "static"
+requires = []
+why = "GTFS times past 24:00:00 belong to the PREVIOUS service date. The engine looks back two days when resolving a window (core/gtfs/calendar.candidate_service_dates), which covers anything under 48:00 -- but the audited feed peaks at 25:37:00, and the margin above it is what this assumption protects."
+code_path = "core/gtfs/calendar.parse_gtfs_time and candidate_service_dates; core/gtfs/departures.departures."
+remediation = "Widen the lookback in candidate_service_dates on BOTH sides of the port before raising this threshold. Inspect the offenders with `stl gtfs late-night --threshold 28:00:00`."
+max_hour_exclusive = 28
+
+[assumptions.timezone_unchanged]
+title = "the agency timezone is still America/Chicago"
+checks = "distinct agency_timezone values in agency.txt, against expected_timezone"
+breaks = "All time math. Every departure would be rendered against the wrong offset, and the two DST transition days would be wrong in the opposite direction."
+severity = "critical"
+category = "static"
+requires = []
+why = "Service days are measured from noon-minus-twelve-hours in the agency's zone, not the device's. The zone is hardcoded as AGENCY_TZ in io/clock.py precisely so a device set to another timezone still shows St. Louis times -- which means a change here is invisible until every time is an hour or more off."
+code_path = "io/clock.AGENCY_TZ; core/gtfs/calendar.service_day_start and absolute_time."
+remediation = "A second zone in the feed usually means a new operator was merged in. Decide whether the app covers it at all before changing AGENCY_TZ, and check whether service_day_start now needs to be per-agency."
+expected_timezone = "America/Chicago"
+
+# --------------------------------------------------------------- stability ---
+# Comparisons against a pinned earlier snapshot. These skip without one --
+# there is nothing to measure a single feed against.
+
+[assumptions.stop_ids_stable]
+title = "stop_codes survive a pick"
+checks = "share of the baseline's stop_codes still present in the current feed, against min_survival"
+breaks = "Users' saved stops. A retired code turns a saved stop into a dead entry with no explanation."
+severity = "high"
+category = "stability"
+requires = ["baseline"]
+why = "Saved stops are the app's only persistence and the whole reason it beats a website on a phone with no browser. Their durability is an empirical property of Metro's numbering, never a promise, so it has to be measured every pick."
+code_path = "Whatever persists saved stops on device; `stl diff stop-ids` and `stl history stop-id-churn` measure the same thing over longer spans."
+remediation = "List the casualties with `stl diff stop-ids <baseline> <current>`. If the loss is large, the app needs a migration path (match by name and coordinates) and a visible 'this stop was retired' state instead of an empty timetable."
+min_survival = 0.98
+
+[assumptions.rail_route_ids_stable]
+title = "MetroLink route_ids are unchanged"
+checks = "the set of route_ids whose route_type is in rail_route_types, against the same set in the baseline"
+breaks = "Any rail special-casing: line colours, station lists, and the holiday rules where rail runs 'Weekend' service while bus runs Sunday."
+severity = "medium"
+category = "stability"
+requires = ["baseline"]
+why = "Rail and bus are different products in the rider's head and in Metro's holiday table, so the app special-cases rail by route_id. A renumbered rail route makes that special-casing silently apply to nothing."
+code_path = "Any rail branch keyed on route_id; `stl bundle holidays`, which keeps bus and rail mappings distinct."
+remediation = "Diff the routes (`stl diff routes <baseline> <current>`). If ids genuinely changed, update every rail-keyed constant in the tool and regenerate the bundled holiday mapping in the same commit."
+rail_route_types = ["0", "1", "2"]
+
+# ---------------------------------------------------------------- realtime ---
+# Need a realtime sample. `rt_feeds` carries, per entity: header_timestamp,
+# age_seconds, trip_ids, and optionally `unmodelled` (the rows from
+# core/rt/decode.field_census). Missing sample = skip.
+
+[assumptions.rt_fresh]
+title = "all three realtime feeds are recent"
+checks = "the oldest age_seconds across required_entities, against max_age_seconds; a required entity with no sample at all counts as a failure"
+breaks = "Live arrivals. A stale feed does not look broken -- it looks like a bus that is not moving."
+severity = "high"
+category = "realtime"
+requires = ["rt_feeds"]
+why = "The merged view (`rt stop-arrivals`) is what the app renders. Predictions built on a header timestamp from an hour ago are worse than showing the schedule, because the rider has no way to tell the difference."
+code_path = "core/rt/merge.merge; core/service.rt_health, which uses the same staleness threshold -- keep the two numbers equal."
+remediation = "Check whether all three feeds went stale together (Metro-side outage) or just one (a URL moved). If realtime is genuinely unavailable, the app must degrade to scheduled-only and SAY SO, which is what the rt_absent oracle case pins down."
+max_age_seconds = 300
+required_entities = ["trip_updates", "vehicle_positions", "alerts"]
+
+[assumptions.rt_join_rate]
+title = "realtime trip_ids resolve into the static feed"
+checks = "share of distinct realtime trip_ids found in trips.txt, against min_join_rate"
+breaks = "Post-pick RT/static desync: predictions silently stop matching departures and every arrival falls back to scheduled."
+severity = "high"
+category = "realtime"
+requires = ["rt_feeds"]
+why = "The merge joins on trip_id and nothing else. When Metro publishes a new static feed the realtime producer may keep emitting the previous pick's ids for hours or days; the join rate collapsing is the only visible symptom, and it looks like realtime simply having nothing to say."
+code_path = "core/rt/merge.index_trip_updates and merge, whose match_rate is the same measurement taken over one page of departures."
+remediation = "Re-fetch the static feed first -- the usual cause is a stale local snapshot, not a broken producer. If the rate stays low against a fresh feed the two Metro systems are genuinely out of step and only Metro can fix it; degrade to scheduled-only until it recovers."
+min_join_rate = 0.95
+entity = "trip_updates"
+
+[assumptions.rt_wire_shape]
+title = "no unmodelled protobuf field is common in the wire data"
+checks = "the highest presence_rate among unmodelled paths in the field census, against max_unmodelled_rate"
+breaks = "The hand-rolled/kotlinx decoder. A field it has never seen is skipped silently, so the data is simply absent rather than wrong -- which is far harder to notice."
+severity = "medium"
+category = "realtime"
+requires = ["rt_feeds"]
+why = "The LP3 has no protobuf runtime on the dependency allow-list, so the Kotlin decoder is written from core/rt/schema.py by hand. Anything Metro starts emitting that is not in that table is invisible to it. A rising unmodelled rate is advance warning; a rider-reported bug is not."
+code_path = "core/rt/schema.MESSAGES and core/rt/decode.decode_message, which collects unknown fields under `_unknown` rather than dropping them."
+remediation = "Identify the field with `stl rt schema --samples N` and `stl rt wire`. A path containing '?<n>' is a field number absent from schema.py: name it there, then decide whether the Kotlin decoder needs it or can keep skipping it deliberately."
+max_unmodelled_rate = 0.05
+
+# --------------------------------------------------------------------- web ---
+# Content hashes from `stl web capture`. `expected_hash` ships empty: a hash
+# invented before the first capture would make the suite red on day one. These
+# skip until you capture the page and paste the hash in, which is also the
+# gesture that means "I have read this page and accept its current contents".
+
+[assumptions.fares_unchanged]
+title = "the published fare table has not changed"
+checks = "the fares page content hash from `stl web capture`, against expected_hash"
+breaks = "The bundled fare table is now lying to users about what a ride costs."
+severity = "high"
+category = "web"
+requires = ["web_hashes"]
+why = "Fares are not in the GTFS feed at all (see no_fare_files), so the app ships a table scraped from metrostlouis.org at build time. A bundled table cannot notice that it is out of date; only this can."
+code_path = "`stl bundle fares`, whose output carries an as_of date and source URL baked in for exactly this reason."
+remediation = "Diff it (`stl web diff fares <a> <b>`). If the prices moved, regenerate the bundle, ship it, and only then paste the new hash into expected_hash here -- updating the hash first hides the change from the next run."
+page = "fares"
+expected_hash = ""
+
+[assumptions.holidays_unchanged]
+title = "the published holiday schedule has not changed"
+checks = "the holidays page content hash from `stl web capture`, against expected_hash"
+breaks = "The bundled holiday mapping, which is what tells the app that Labor Day runs Sunday service for bus and Weekend service for rail."
+severity = "medium"
+category = "web"
+requires = ["web_hashes"]
+why = "calendar_dates.txt carries the exceptions but not their names or reasoning, and it only covers the dates inside the current feed. The published table is the source for anything beyond the feed's horizon, and for the bus/rail distinction the feed does not spell out."
+code_path = "`stl bundle holidays`; the holiday_bus_sunday and holiday_rail_weekend oracle cases, which assert the two resolve differently."
+remediation = "Extract the new table (`stl web extract holidays`), cross-check it against `stl gtfs holidays --year`, regenerate the bundle, then update expected_hash."
+page = "holidays"
+expected_hash = ""
+
+[assumptions.terms_unchanged]
+title = "the developer terms have not changed"
+checks = "the developer-resources page content hash from `stl web capture`, against expected_hash"
+breaks = "Your redistribution rights. The licence is non-exclusive, limited and REVOCABLE, and the app ships feed-derived data inside an APK."
+severity = "critical"
+category = "web"
+requires = ["web_hashes"]
+why = "Everything this tool and the app do rests on that page's permission, including bundling a pruned copy of the feed on device. A change there can invalidate the shipping model, and it is the one failure in this suite that no code change can work around."
+code_path = "Not a code path -- a legal one. The tool's README and the vetting-defence text in `stl bundle manifest` both cite it."
+remediation = "Read the diff yourself before touching anything else. If redistribution terms narrowed, stop shipping the bundled dataset and reassess; Metro invites developer contact, so ask rather than guess."
+page = "developer_terms"
+expected_hash = ""
+
+# ----------------------------------------------------------- opportunities ---
+# The pattern worth generalising: an assertion suite should also watch for
+# things getting BETTER. Severity "opportunity" means a negative result is
+# reported as `opportunity`, never `fail`, so cron stays quiet and exit 3 stays
+# meaningful.
+
+[assumptions.no_fare_files]
+title = "fare_*.txt are still absent from the feed"
+checks = "which of fare_tables exist in the imported feed, expected to be none"
+breaks = "Nothing. This one watches for an improvement: if Metro starts publishing fares in the feed, the scraped fare table can be retired."
+severity = "opportunity"
+category = "static"
+requires = []
+why = "Fares currently have to be scraped from a web page and bundled, which is fragile enough to need its own assumption (fares_unchanged). Feed-published fares would delete that whole dependency -- and nobody announces it, so the only way to find out is to keep looking."
+code_path = "`stl bundle fares`, today sourced from core web extraction rather than the feed; core/gtfs/inspect.OPTIONAL_FILES, which already tracks the absence."
+remediation = "Not a fix -- an opening. Compare the feed's fares against the scraped table before switching, then retire the scraper and fares_unchanged together."
+fare_tables = ["fare_attributes", "fare_rules", "fare_products", "fare_media", "fare_leg_rules", "fare_transfer_rules", "rider_categories", "timeframes", "areas", "networks"]

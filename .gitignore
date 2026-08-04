@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+.data/
+fixtures/
+
+# Fetched feed data. Regenerable, ~60 MB, and Metro's licence is revocable --
+# redistributing their data through this repo is not a right we hold.
+snapshots/
+cache/
+.DS_Store
